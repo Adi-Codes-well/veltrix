@@ -2,29 +2,54 @@ import OpenAI from 'openai';
 
 export class AIService {
     private openai: OpenAI;
+    private systemPrompt: string;
+    private model: string;
 
-    constructor(apiKey: string) {
-        // In a real app, never hardcode this. Use vscode.workspace.getConfiguration
-        this.openai = new OpenAI({ apiKey: apiKey });
+    // 🟢 Updated Constructor: Accepts 3 arguments (Key, Prompt, Model)
+    constructor(apiKey: string, systemPrompt: string, model: string) {
+        this.systemPrompt = systemPrompt;
+        this.model = model;
+
+        // 🟢 SMART LOGIC: Check if the key belongs to OpenRouter
+        let baseURL = undefined; // Default (OpenAI)
+        let defaultHeaders = undefined;
+
+        // Case 1: OpenRouter (Key starts with 'sk-or-v1')
+        if (apiKey.startsWith('sk-or-v1')) {
+            baseURL = "https://openrouter.ai/api/v1";
+            defaultHeaders = {
+                "HTTP-Referer": "https://github.com/veltrix", // Required by OpenRouter
+                "X-Title": "Veltrix"                          // Required by OpenRouter
+            };
+        } 
+        // Case 2: Google Gemini (Key starts with 'AIza')
+        else if (apiKey.startsWith('AIza')) {
+            baseURL = "https://generativelanguage.googleapis.com/v1beta/openai/";
+        }
+
+        // Initialize OpenAI Client with the correct URL
+        this.openai = new OpenAI({ 
+            apiKey: apiKey,
+            baseURL: baseURL,
+            defaultHeaders: defaultHeaders
+        });
     }
 
-    async *streamChat(prompt: string, currentCodeContext?: string) {
-        const systemMessage = "You are a specialized coding assistant for VS Code.";
+    async *streamChat(userPrompt: string, currentCodeContext?: string) {
         const fullPrompt = currentCodeContext 
-            ? `Context (Current File):\n\`\`\`\n${currentCodeContext}\n\`\`\`\n\nUser Question: ${prompt}`
-            : prompt;
+            ? `Context:\n\`\`\`\n${currentCodeContext}\n\`\`\`\n\nQuestion: ${userPrompt}`
+            : userPrompt;
 
         try {
             const stream = await this.openai.chat.completions.create({
-                model: 'gpt-4o', // or 'gpt-3.5-turbo'
+                model: this.model, // 🟢 Use the dynamic model (e.g., gemini-2.0-flash-exp:free)
                 messages: [
-                    { role: 'system', content: systemMessage },
+                    { role: 'system', content: this.systemPrompt },
                     { role: 'user', content: fullPrompt }
                 ],
                 stream: true,
             });
 
-            // Yield chunks as they arrive
             for await (const chunk of stream) {
                 yield chunk.choices[0]?.delta?.content || "";
             }

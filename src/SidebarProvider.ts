@@ -1,22 +1,30 @@
 import * as vscode from "vscode";
 import { AIService } from "./AIService";
 
+// 1. Define what an "Agent" looks like
+interface AgentConfig {
+  id: string;
+  name: string;
+  role: string;
+  systemPrompt: string;
+  model: string;
+}
+
 export class SidebarProvider implements vscode.WebviewViewProvider {
   _view?: vscode.WebviewView;
-  private aiService: AIService;
 
-  constructor(private readonly _extensionUri: vscode.Uri) {
-    // ⚠️ Ideally, fetch this from vscode.workspace.getConfiguration()
-    this.aiService = new AIService("YOUR_OPENAI_API_KEY_HERE");
-  }
+  // 2. We removed 'private aiService'. It is now created dynamically.
+
+  constructor(
+    private readonly _extensionUri: vscode.Uri,
+    private readonly _context: vscode.ExtensionContext // 🟢 NEW: Added Context
+  ) {}
 
   public resolveWebviewView(webviewView: vscode.WebviewView) {
     this._view = webviewView;
 
     webviewView.webview.options = {
-      // Allow scripts in the webview
       enableScripts: true,
-      // Restrict the webview to only loading content from our extension's `webview-ui/dist` directory
       localResourceRoots: [
         vscode.Uri.joinPath(this._extensionUri, "webview-ui", "dist")
       ],
@@ -24,41 +32,85 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-    // Listen for messages from the React UI
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
+        
+        // 🟢 NEW: Save an Agent Profile
+        case "saveAgent": {
+            const agent = data.value as AgentConfig;
+            const apiKey = data.apiKey; // Front-end sends this separately
+
+            // Save the Profile (Name, Prompt, Model) to Global State
+            const agents = this._context.globalState.get<AgentConfig[]>("agents") || [];
+            // Update if exists, or push new
+            const index = agents.findIndex(a => a.id === agent.id);
+            if (index > -1) {
+                agents[index] = agent;
+            } else {
+                agents.push(agent);
+            }
+            await this._context.globalState.update("agents", agents);
+
+            // Save the API Key to Secure Storage (Encrypted)
+            if (apiKey) {
+                await this._context.secrets.store(`agent-key-${agent.id}`, apiKey);
+            }
+
+            // Tell the UI the update is done
+            this._view?.webview.postMessage({ type: "updateAgents", value: agents });
+            break;
+        }
+
+        // 🟢 NEW: Load Agents on Startup
+        case "getAgents": {
+            const agents = this._context.globalState.get<AgentConfig[]>("agents") || [];
+            this._view?.webview.postMessage({ type: "updateAgents", value: agents });
+            break;
+        }
+
+        // 🟢 UPDATED: Chat with a specific Agent
         case "onPrompt": {
           if (!data.value) {
             return;
-        }
+          }
+          
+          const activeAgentId = data.agentId; // UI must send this!
+          
+          // 1. Find the Agent Profile
+          const agents = this._context.globalState.get<AgentConfig[]>("agents") || [];
+          const agent = agents.find(a => a.id === activeAgentId);
 
-          // 1. Get the current code context (if a file is open)
+          if (!agent) {
+             this._view?.webview.postMessage({ type: "onToken", value: "Error: Agent not found." });
+             return;
+          }
+
+          // 2. Get their API Key
+          const apiKey = await this._context.secrets.get(`agent-key-${agent.id}`);
+          if (!apiKey) {
+             this._view?.webview.postMessage({ type: "onToken", value: "Error: API Key missing." });
+             return;
+          }
+
+          // 3. Initialize Service Dynamically
+          // Note: You must update AIService.ts to accept these 3 params!
+          const aiService = new AIService(apiKey, agent.systemPrompt, agent.model);
+
+          // 4. Get Context & Stream
           const editor = vscode.window.activeTextEditor;
           const currentCode = editor ? editor.document.getText() : undefined;
 
           try {
-            // 2. Stream the response from AIService
-            // We pass the user's prompt (data.value) and the code context
-            for await (const token of this.aiService.streamChat(data.value, currentCode)) {
-              if (this._view) {
-                this._view.webview.postMessage({ type: "onToken", value: token });
-              }
+            for await (const token of aiService.streamChat(data.value, currentCode)) {
+              this._view?.webview.postMessage({ type: "onToken", value: token });
             }
-            
-            // 3. Signal that streaming is done
-            if (this._view) {
-              this._view.webview.postMessage({ type: "onComplete" });
-            }
-
+            this._view?.webview.postMessage({ type: "onComplete" });
           } catch (error) {
-            // Handle API errors gracefully
-             if (this._view) {
-                this._view.webview.postMessage({ 
-                    type: "onToken", 
-                    value: `\n\nError: ${error instanceof Error ? error.message : "Unknown error"}` 
-                });
-                this._view.webview.postMessage({ type: "onComplete" });
-             }
+             this._view?.webview.postMessage({ 
+                type: "onToken", 
+                value: `Error: ${error instanceof Error ? error.message : "Unknown"}` 
+            });
+            this._view?.webview.postMessage({ type: "onComplete" });
           }
           break;
         }
@@ -66,19 +118,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  // ... (Your _getHtmlForWebview and getNonce functions stay exactly the same)
   private _getHtmlForWebview(webview: vscode.Webview) {
-    // Get the local path to main script run in the webview, then convert it to a uri we can use in the webview.
-    // ⚠️ NOTE: This assumes your Vite build outputs to 'webview-ui/dist/assets/index.js'
-    // You must configure Vite to output fixed filenames (see Step 2 below)
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, "webview-ui", "dist", "assets", "index.js")
-    );
-    
-    const styleUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(this._extensionUri, "webview-ui", "dist", "assets", "index.css")
-    );
-
-    // Use a nonce to only allow specific scripts to run.
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "webview-ui", "dist", "assets", "index.js"));
+    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "webview-ui", "dist", "assets", "index.css"));
     const nonce = getNonce();
 
     return `<!DOCTYPE html>
@@ -98,7 +141,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 }
 
-// Helper function to generate a random string for security
 function getNonce() {
   let text = "";
   const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
