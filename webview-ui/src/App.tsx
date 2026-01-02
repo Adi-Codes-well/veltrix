@@ -134,6 +134,64 @@ function App() {
     setView("chat");
   };
 
+  // 🟢 Helper to parse AI messages and render buttons
+  const renderMessageContent = (
+    content: string,
+    role: "user" | "assistant"
+  ) => {
+    if (role === "user") return content;
+
+    // Regex to find <execute_command>...</execute_command>
+    const cmdMatch = content.match(
+      /<execute_command>(.*?)<\/execute_command>/s
+    );
+    if (cmdMatch) {
+      const cmd = cmdMatch[1].trim();
+      return (
+        <div className="action-box">
+          <p>⚡ Suggests Command:</p>
+          <code>{cmd}</code>
+          <button
+            className="run-btn"
+            onClick={() =>
+              vscode.postMessage({ type: "executeCommand", value: cmd })
+            }
+          >
+            Run Command
+          </button>
+        </div>
+      );
+    }
+
+    // Regex to find <write_file path="...">...</write_file>
+    const fileMatch = content.match(
+      /<write_file path="(.*?)">(.*?)<\/write_file>/s
+    );
+    if (fileMatch) {
+      const filePath = fileMatch[1];
+      const fileContent = fileMatch[2];
+      return (
+        <div className="action-box">
+          <p>📝 Suggests Edit: {filePath}</p>
+          <button
+            className="diff-btn"
+            onClick={() =>
+              vscode.postMessage({
+                type: "requestDiff",
+                value: { path: filePath, content: fileContent },
+              })
+            }
+          >
+            Review Changes
+          </button>
+        </div>
+      );
+    }
+
+    // Default: Just return text
+    return content;
+  };
+
   // --- RENDER ---
   return (
     <div className="container">
@@ -222,7 +280,8 @@ function App() {
           <div className="messages">
             {messages.map((m, i) => (
               <div key={i} className={`message ${m.role}`}>
-                {m.content}
+                {/* 🟢 Call the helper function here */}
+                {renderMessageContent(m.content, m.role)}
               </div>
             ))}
             <div ref={bottomRef} />

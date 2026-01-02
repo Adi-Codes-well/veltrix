@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AIService } from "./AIService";
+import * as path from "path";
 
 // 1. Define what an "Agent" looks like
 interface AgentConfig {
@@ -96,15 +97,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // Note: You must update AIService.ts to accept these 3 params!
           const aiService = new AIService(apiKey, agent.systemPrompt, agent.model);
 
+          const projectTree = await this._getProjectStructure();
           // 4. Get Context & Stream
           const editor = vscode.window.activeTextEditor;
-          const currentCode = editor ? editor.document.getText() : undefined;
+          const currentCode = editor ? editor.document.getText() : "";
+
+          const enrichedPrompt = `
+Current Project Structure:
+${projectTree}
+
+Current Open File Code:
+${currentCode}
+
+User Request: ${data.value}
+`;
 
           try {
-            for await (const token of aiService.streamChat(data.value, currentCode)) {
-              this._view?.webview.postMessage({ type: "onToken", value: token });
-            }
-            this._view?.webview.postMessage({ type: "onComplete" });
+            for await (const token of aiService.streamChat(enrichedPrompt, "")) {
+    this._view?.webview.postMessage({ type: "onToken", value: token });
+  }
+  this._view?.webview.postMessage({ type: "onComplete" });
           } catch (error) {
              this._view?.webview.postMessage({ 
                 type: "onToken", 
@@ -113,6 +125,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._view?.webview.postMessage({ type: "onComplete" });
           }
           break;
+        }
+
+        case "executeCommand": {
+            const command = data.value;
+            const terminal = vscode.window.createTerminal(`Veltrix: ${command}`);
+            terminal.show();
+            terminal.sendText(command);
+            break;
+        }
+
+        case "requestDiff": {
+            const { path: filePath, content } = data.value;
+            
+            // Create a temp file to compare against
+            // Note: In a real app, you might use 'untitled:' schema, but writing to a temp file is safer for diffs
+
+            const rootPath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
+    if (!rootPath) {
+        vscode.window.showErrorMessage("No workspace opened");
+        return;
+    }
+
+            const openPath = vscode.Uri.file(path.join(rootPath, filePath));
+            const newFileUri = vscode.Uri.parse(`untitled:${openPath.fsPath}.new`);
+            
+            const doc = await vscode.workspace.openTextDocument(newFileUri);
+            const edit = new vscode.WorkspaceEdit();
+            edit.insert(newFileUri, new vscode.Position(0, 0), content);
+            await vscode.workspace.applyEdit(edit);
+
+            // Open the Diff
+            await vscode.commands.executeCommand("vscode.diff", openPath, newFileUri, `Review: ${filePath}`);
+            break;
         }
       }
     });
@@ -139,6 +184,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       </body>
       </html>`;
   }
+
+  private async _getProjectStructure(): Promise<string> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+      return "";
+    }
+
+    const rootPath = workspaceFolders[0].uri.fsPath;
+    
+    // Ignore node_modules, .git, dist, etc.
+    const ignorePatterns = ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/out/**"];
+    const files = await vscode.workspace.findFiles("**/*", `{${ignorePatterns.join(",")}}`);
+
+    // Convert file paths to a simple tree string
+    const relativePaths = files.map(file => path.relative(rootPath, file.fsPath));
+    return "Project Structure:\n" + relativePaths.join("\n");
+}
+
 }
 
 function getNonce() {
