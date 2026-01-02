@@ -150,7 +150,7 @@ function App() {
       return (
         <div className="action-box">
           <p>⚡ Suggests Command:</p>
-          <code>{cmd}</code>
+          <code className="code-block">{cmd}</code>
           <button
             className="run-btn"
             onClick={() =>
@@ -172,18 +172,37 @@ function App() {
       const fileContent = fileMatch[2];
       return (
         <div className="action-box">
-          <p>📝 Suggests Edit: {filePath}</p>
-          <button
-            className="diff-btn"
-            onClick={() =>
-              vscode.postMessage({
-                type: "requestDiff",
-                value: { path: filePath, content: fileContent },
-              })
-            }
-          >
-            Review Changes
-          </button>
+          <p>📝 Suggests Edit: <strong>{filePath}</strong></p>
+          
+          <div className="button-group" style={{ display: 'flex', gap: '10px' }}>
+            {/* 1. COMPARE BUTTON */}
+            <button
+                className="diff-btn"
+                style={{ flex: 1, backgroundColor: '#0e639c' }}
+                onClick={() =>
+                vscode.postMessage({
+                    type: "requestDiff",
+                    value: { path: filePath, content: fileContent },
+                })
+                }
+            >
+                🔍 Compare
+            </button>
+
+            {/* 2. ACCEPT BUTTON (New!) */}
+            <button
+                className="accept-btn"
+                style={{ flex: 1, backgroundColor: '#2da44e' }}
+                onClick={() =>
+                vscode.postMessage({
+                    type: "applyFile",
+                    value: { path: filePath, content: fileContent },
+                })
+                }
+            >
+                ✅ Accept
+            </button>
+          </div>
         </div>
       );
     }
@@ -237,6 +256,8 @@ function App() {
             <option value="google/gemini-2.0-flash-exp:free">
               Gemini Free (OpenRouter)
             </option>
+            <option value="llama3.1-8b">Llama 3.1 8B (Cerebras)</option>
+  <option value="llama3.1-70b">Llama 3.1 70B (Cerebras)</option>
           </select>
           <textarea
             placeholder="System Prompt (Instructions)"

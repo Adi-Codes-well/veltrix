@@ -5,31 +5,39 @@ export class AIService {
     private systemPrompt: string;
     private model: string;
 
-    // 🟢 Updated Constructor: Accepts 3 arguments (Key, Prompt, Model)
     constructor(apiKey: string, systemPrompt: string, model: string) {
         this.systemPrompt = systemPrompt;
         this.model = model;
 
-        // 🟢 SMART LOGIC: Check if the key belongs to OpenRouter
+        // 🟢 FIX 1: Trim whitespace to prevent " csk-" errors
+        const cleanKey = apiKey.trim();
+
         let baseURL = undefined; // Default (OpenAI)
         let defaultHeaders = undefined;
 
-        // Case 1: OpenRouter (Key starts with 'sk-or-v1')
-        if (apiKey.startsWith('sk-or-v1')) {
+        // Case 1: OpenRouter
+        if (cleanKey.startsWith('sk-or-v1')) {
             baseURL = "https://openrouter.ai/api/v1";
             defaultHeaders = {
-                "HTTP-Referer": "https://github.com/veltrix", // Required by OpenRouter
-                "X-Title": "Veltrix"                          // Required by OpenRouter
+                "HTTP-Referer": "https://github.com/veltrix", 
+                "X-Title": "Veltrix"                          
             };
         } 
-        // Case 2: Google Gemini (Key starts with 'AIza')
-        else if (apiKey.startsWith('AIza')) {
+        // Case 2: Google Gemini
+        else if (cleanKey.startsWith('AIza')) {
             baseURL = "https://generativelanguage.googleapis.com/v1beta/openai/";
         }
+        // 🟢 Case 3: Cerebras
+        else if (cleanKey.startsWith('csk-')) {
+            baseURL = "https://api.cerebras.ai/v1";
+        }
 
-        // Initialize OpenAI Client with the correct URL
+        // 🟢 FIX 2: Debug Log (Check the "Debug Console" in VS Code to see this)
+        console.log(`[Veltrix] Initializing AI with BaseURL: ${baseURL || "Default OpenAI"}`);
+
+        // Initialize OpenAI Client
         this.openai = new OpenAI({ 
-            apiKey: apiKey,
+            apiKey: cleanKey, // Use the trimmed key
             baseURL: baseURL,
             defaultHeaders: defaultHeaders
         });
@@ -42,7 +50,7 @@ export class AIService {
 
         try {
             const stream = await this.openai.chat.completions.create({
-                model: this.model, // 🟢 Use the dynamic model (e.g., gemini-2.0-flash-exp:free)
+                model: this.model, 
                 messages: [
                     { role: 'system', content: this.systemPrompt },
                     { role: 'user', content: fullPrompt }
@@ -54,6 +62,8 @@ export class AIService {
                 yield chunk.choices[0]?.delta?.content || "";
             }
         } catch (error) {
+            // Log the full error to help debug
+            console.error("AI Service Error:", error);
             throw new Error(`AI Error: ${error}`);
         }
     }

@@ -208,3 +208,34 @@
   cursor: pointer;
 }
 .run-btn:hover { background: #1177bb; }
+
+.action-box {
+  background: #252526;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 8px;
+}
+.button-group {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+.diff-btn {
+  background-color: #007fd4;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex: 1;
+}
+.accept-btn {
+  background-color: #2ea043; /* Github Green */
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex: 1;
+}
