@@ -8,6 +8,7 @@ import * as path from "path";
 export class SidebarProvider implements vscode.WebviewViewProvider {
   _view?: vscode.WebviewView;
   private projectManager: ProjectManager;
+  private activeAgentId: string | undefined;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -50,81 +51,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         case "onPrompt": {
-          if (!data.value) return;
-          
-          // 1. Get Agent & API Key
-          const activeAgentId = data.agentId; 
-          const agents = this._context.globalState.get<AgentConfig[]>("agents") || [];
-          const agent = agents.find(a => a.id === activeAgentId);
-
-          if (!agent) {
-             this._view?.webview.postMessage({ type: "onToken", value: "Error: Agent not found." });
-             return;
-          }
-
-          const apiKey = await this._context.secrets.get(`agent-key-${agent.id}`);
-          if (!apiKey) {
-             this._view?.webview.postMessage({ type: "onToken", value: "Error: API Key missing." });
-             return;
-          }
-
-          // 2. Add User Message to History [NEW]
-          this.projectManager.addMessage('user', data.value);
-
-          const aiService = new AIService(apiKey, agent.systemPrompt, agent.model);
-          const projectTree = await this._getProjectStructure();
-          const editor = vscode.window.activeTextEditor;
-          const currentCode = editor ? editor.document.getText() : "";
-
-          // 3. Construct the "Shared Brain" Prompt [NEW]
-          // We combine: Formatting + Project State + Code Context + User Query
-          const formattingInstructions = `
-            IMPORTANT: You are an agent that edits files.
-            When you write code, you MUST wrap it in these XML tags:
-            <write_file path="src/App.tsx"> ... code ... </write_file>
-            <execute_command>npm install</execute_command>
-            ALWAYS use the XML tags.
-          `;
-          
-          const brainContext = this.projectManager.getContextPrompt(); // Get State
-
-          const enrichedPrompt = `
-            ${formattingInstructions}
-
-            ${brainContext} 
-
-            Current Project Structure:
-            ${projectTree}
-
-            Current Open File Code:
-            ${currentCode}
-
-            User Request: ${data.value}
-          `;
-
-          // 4. Stream and Capture Response [NEW]
-          let fullResponse = ""; // Accumulator to save to history later
-
-          try {
-            for await (const token of aiService.streamChat(enrichedPrompt, "")) {
-              fullResponse += token; // Build the full response
-              this._view?.webview.postMessage({ type: "onToken", value: token });
-            }
-            
-            // 5. Add AI Response to History [NEW]
-            this.projectManager.addMessage('assistant', fullResponse);
-            
-            this._view?.webview.postMessage({ type: "onComplete" });
-
-          } catch (error) {
-             this._view?.webview.postMessage({ 
-                type: "onToken", 
-                value: `Error: ${error instanceof Error ? error.message : "Unknown"}` 
-            });
-            this._view?.webview.postMessage({ type: "onComplete" });
-          }
-          break;
-        }
+    if (!data.value) {
+        return;
+    }
+    
+    // Set the state so recursive calls know who the agent is
+    this.activeAgentId = data.agentId; 
+    
+    // Trigger the cycle
+    await this._runAgentCycle(data.value, false);
+    break;
+}
 
         case "executeCommand": {
             const command = data.value;
@@ -152,19 +89,53 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
         }
 
-        case "applyFile": {
-            const { path: filePath, content } = data.value;
-            const rootPath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
-            if (!rootPath) { return; }
+       case "applyFile": {
+    const { path: filePath, content } = data.value;
+    const rootPath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
+    if (!rootPath) { return; }
 
-            const uri = vscode.Uri.file(path.join(rootPath, filePath));
-            await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf-8"));
-            
-            vscode.window.showInformationMessage(`✅ Applied changes to ${filePath}`);
-            // Optional: Close the diff editor after applying
-            vscode.commands.executeCommand("workbench.action.closeActiveEditor");
-            break;
-        }
+    const uri = vscode.Uri.file(path.join(rootPath, filePath));
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf-8"));
+    
+    vscode.window.showInformationMessage(`✅ Applied changes to ${filePath}`);
+    vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+
+    // Add success message to history
+    const systemMessage = `System: Successfully updated ${filePath}. Check the plan and execute the next step.`;
+    this.projectManager.addMessage('system', systemMessage);
+
+    // Continue the loop automatically
+    await this._runAgentCycle("", true); 
+    break;
+}
+
+        case "readFile": {
+    const filePath = data.value;
+    const rootPath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
+    if (!rootPath) return;
+
+    const uri = vscode.Uri.file(path.join(rootPath, filePath));
+    try {
+        const uint8Array = await vscode.workspace.fs.readFile(uri);
+        const fileContent = Buffer.from(uint8Array).toString('utf-8');
+        
+        // Inject file content into history
+        const systemMessage = `
+<file_content path="${filePath}">
+${fileContent}
+</file_content>
+`;
+        this.projectManager.addMessage('system', systemMessage);
+        
+        // Continue the loop automatically
+        await this._runAgentCycle("", true); 
+        
+    } catch (error) {
+        this.projectManager.addMessage('system', `Error reading ${filePath}: ${error}`);
+        await this._runAgentCycle("", true);
+    }
+    break;
+}
       }
     });
   }
@@ -198,6 +169,101 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const files = await vscode.workspace.findFiles("**/*", `{${ignorePatterns.join(",")}}`);
     const relativePaths = files.map(file => path.relative(rootPath, file.fsPath));
     return "Project Structure:\n" + relativePaths.join("\n");
+  }
+
+  // ... existing methods ...
+
+  private async _runAgentCycle(userPrompt: string, isSystemContinuation: boolean = false) {
+    // 1. Validation: Ensure we have an active agent
+    if (!this.activeAgentId) {
+        this._view?.webview.postMessage({ type: "onToken", value: "Error: No active agent selected." });
+        return;
+    }
+
+    const agents = this._context.globalState.get<AgentConfig[]>("agents") || [];
+    const agent = agents.find(a => a.id === this.activeAgentId);
+
+    if (!agent) {
+        this._view?.webview.postMessage({ type: "onToken", value: "Error: Agent configuration not found." });
+        return;
+    }
+
+    const apiKey = await this._context.secrets.get(`agent-key-${agent.id}`);
+    if (!apiKey) {
+        this._view?.webview.postMessage({ type: "onToken", value: "Error: API Key missing." });
+        return;
+    }
+
+    // 2. Update History (Only if it's a new user prompt, not a system recursion)
+    if (userPrompt && !isSystemContinuation) {
+        this.projectManager.addMessage('user', userPrompt);
+    }
+
+    // 3. Prepare Context and Service
+    const aiService = new AIService(apiKey, agent.systemPrompt, agent.model);
+    const projectTree = await this._getProjectStructure();
+    
+    // Get active file content if available
+    const editor = vscode.window.activeTextEditor;
+    const currentCode = editor ? editor.document.getText() : "(No active file)";
+
+    const formattingInstructions = `
+You are an elite coding agent. Follow this strict process:
+1. **EXPLORE:** If you need to edit a file, check if it's in [CURRENT OPEN FILE]. If not, you MUST use <read_file path="src/main.ts" /> first.
+2. **THINK:** Plan your changes.
+3. **ACT:** Generate code using <write_file>.
+
+**CRITICAL RULES:**
+- <write_file> must contain the **COMPLETE** file content. No comments like "// ... rest of code".
+- Existing code must be preserved exactly.
+
+**TOOLS:**
+- <read_file path="relative/path/to/file" />
+- <write_file path="relative/path/to/file">FULL CONTENT HERE</write_file>
+- <execute_command>npm run test</execute_command>
+`;
+
+    // 4. Construct Final Prompt
+    // We get the conversation history from ProjectManager
+    const historyContext = this.projectManager.getContextPrompt(); 
+
+    const enrichedPrompt = `
+${formattingInstructions}
+
+${historyContext} 
+
+Current Project Structure:
+${projectTree}
+
+Current Open File Code:
+${currentCode}
+
+${!isSystemContinuation ? `User Request: ${userPrompt}` : "System: Continue based on the previous output."}
+`;
+
+    // 5. Stream Response
+    let fullResponse = "";
+    
+    try {
+        // Send a signal that we are thinking
+        this._view?.webview.postMessage({ type: "onToken", value: "" }); 
+
+        for await (const token of aiService.streamChat(enrichedPrompt, "")) {
+            fullResponse += token;
+            this._view?.webview.postMessage({ type: "onToken", value: token });
+        }
+
+        // 6. Save Assistant Response to History
+        this.projectManager.addMessage('assistant', fullResponse);
+        this._view?.webview.postMessage({ type: "onComplete" });
+
+    } catch (error) {
+        this._view?.webview.postMessage({ 
+            type: "onToken", 
+            value: `\nError: ${error instanceof Error ? error.message : "Unknown"}` 
+        });
+        this._view?.webview.postMessage({ type: "onComplete" });
+    }
   }
 }
 
