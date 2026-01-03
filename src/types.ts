@@ -1,11 +1,20 @@
 export interface AgentConfig {
   id: string;
   name: string;
-  role: string; // e.g., "Frontend Dev", "QA"
+  role: string;
   systemPrompt: string;
-  model: string; // "gpt-4o", "gpt-3.5-turbo"
-  provider: "openai" | "anthropic"; // Prepare for future expansion
+  model: string;
+  provider?: "openai" | "anthropic"; 
 }
 
-// We don't store the API key in the config object to avoid leaking it in logs
-// API Keys will be stored in SecretStorage mapped by agent.id
+export interface ProjectTask {
+  id: string;
+  title: string;
+  status: 'pending' | 'active' | 'completed';
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+}

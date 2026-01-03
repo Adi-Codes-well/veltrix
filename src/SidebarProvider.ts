@@ -1,22 +1,20 @@
 import * as vscode from "vscode";
 import { AIService } from "./AIService";
+import { AgentConfig } from "./types";
+import { ProjectManager } from "./ProjectManager";
 import * as path from "path";
 
-interface AgentConfig {
-  id: string;
-  name: string;
-  role: string;
-  systemPrompt: string;
-  model: string;
-}
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   _view?: vscode.WebviewView;
+  private projectManager: ProjectManager;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _context: vscode.ExtensionContext
-  ) {}
+  ) {
+    this.projectManager = new ProjectManager(_context);
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView) {
     this._view = webviewView;
@@ -54,6 +52,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "onPrompt": {
           if (!data.value) return;
           
+          // 1. Get Agent & API Key
           const activeAgentId = data.agentId; 
           const agents = this._context.globalState.get<AgentConfig[]>("agents") || [];
           const agent = agents.find(a => a.id === activeAgentId);
@@ -69,29 +68,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
              return;
           }
 
+          // 2. Add User Message to History [NEW]
+          this.projectManager.addMessage('user', data.value);
+
           const aiService = new AIService(apiKey, agent.systemPrompt, agent.model);
           const projectTree = await this._getProjectStructure();
           const editor = vscode.window.activeTextEditor;
           const currentCode = editor ? editor.document.getText() : "";
 
-          // 🟢 CRITICAL: We FORCE the agent to use XML tags here.
-          // This ensures the code goes into the File Area (Diff View), not the Chat.
+          // 3. Construct the "Shared Brain" Prompt [NEW]
+          // We combine: Formatting + Project State + Code Context + User Query
           const formattingInstructions = `
             IMPORTANT: You are an agent that edits files.
             When you write code, you MUST wrap it in these XML tags:
-            <write_file path="src/App.tsx">
-            ... code ...
-            </write_file>
-            
-            When you want to run a command:
+            <write_file path="src/App.tsx"> ... code ... </write_file>
             <execute_command>npm install</execute_command>
-            
-            DO NOT use standard markdown code blocks (like \`\`\`typescript).
             ALWAYS use the XML tags.
           `;
+          
+          const brainContext = this.projectManager.getContextPrompt(); // Get State
 
           const enrichedPrompt = `
             ${formattingInstructions}
+
+            ${brainContext} 
 
             Current Project Structure:
             ${projectTree}
@@ -102,11 +102,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             User Request: ${data.value}
           `;
 
+          // 4. Stream and Capture Response [NEW]
+          let fullResponse = ""; // Accumulator to save to history later
+
           try {
             for await (const token of aiService.streamChat(enrichedPrompt, "")) {
+              fullResponse += token; // Build the full response
               this._view?.webview.postMessage({ type: "onToken", value: token });
             }
+            
+            // 5. Add AI Response to History [NEW]
+            this.projectManager.addMessage('assistant', fullResponse);
+            
             this._view?.webview.postMessage({ type: "onComplete" });
+
           } catch (error) {
              this._view?.webview.postMessage({ 
                 type: "onToken", 
@@ -125,7 +134,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
         }
         
-        // 🟢 1. VIEW DIFF (The "Before vs After" View)
         case "requestDiff": {
             const { path: filePath, content } = data.value;
             const rootPath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
@@ -144,7 +152,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             break;
         }
 
-        // 🟢 2. ACCEPT CHANGE (Writes to the actual file)
         case "applyFile": {
             const { path: filePath, content } = data.value;
             const rootPath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
