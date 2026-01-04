@@ -96,15 +96,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     const uri = vscode.Uri.file(path.join(rootPath, filePath));
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf-8"));
+
+    vscode.window.showInformationMessage(`✅ Updated ${filePath}`);
     
-    vscode.window.showInformationMessage(`✅ Applied changes to ${filePath}`);
+    // Close the diff editor (optional but clean UX)
     vscode.commands.executeCommand("workbench.action.closeActiveEditor");
 
-    // Add success message to history
-    const systemMessage = `System: Successfully updated ${filePath}. Check the plan and execute the next step.`;
+    // Add confirmation to history
+    const systemMessage = `System: Successfully updated ${filePath}.`;
     this.projectManager.addMessage('system', systemMessage);
 
-    // Continue the loop automatically
+    // CONTINUE THE LOOP
+    // The AI needs to know it succeeded so it can move to the next task
     await this._runAgentCycle("", true); 
     break;
 }

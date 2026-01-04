@@ -1,10 +1,16 @@
 import React, { useState, useEffect, useRef } from "react";
-import { vscode } from "../utilities/vscode"; // Standard VSCode API wrapper
+import { vscode } from "../utilities/vscode";
 import { parseTools } from "../utilities/toolParser";
-import "./ChatView.css"; // Assume basic styling exists
+import "./ChatView.css";
 
 interface Message {
   role: "user" | "assistant";
+  content: string;
+}
+
+// [NEW] Interface for the pending file change
+interface PendingChange {
+  path: string;
   content: string;
 }
 
@@ -13,27 +19,22 @@ export const ChatView = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isThinking, setIsThinking] = useState(false);
   
-  // We use a ref to track the current streaming message content
-  // because state updates in event listeners can be tricky.
+  // [NEW] State to track if we are currently reviewing code
+  const [pendingDiff, setPendingDiff] = useState<PendingChange | null>(null);
+
   const streamBuffer = useRef(""); 
 
   useEffect(() => {
-    // Listener for messages from the Extension Backend
     const handleMessage = (event: MessageEvent) => {
       const message = event.data;
 
       switch (message.type) {
         case "onToken":
-          // If this is the start of a new response
           if (!streamBuffer.current) {
             setIsThinking(true);
             setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
           }
-
-          // Append token to buffer
           streamBuffer.current += message.value;
-
-          // Update the UI (the last message in the list)
           setMessages((prev) => {
             const newHistory = [...prev];
             const lastMsg = newHistory[newHistory.length - 1];
@@ -46,26 +47,35 @@ export const ChatView = () => {
 
         case "onComplete": {
           setIsThinking(false);
-          
-          // CRITICAL: Parse tools from the completed message
           const tools = parseTools(streamBuffer.current);
           
-          // Execute detected tools
           tools.forEach((tool) => {
-            console.log("Executing Tool:", tool);
-            vscode.postMessage({
-              type: tool.type,
-              value: tool.value,
-            });
+            console.log("Parsed Tool:", tool);
+
+            // [NEW] INTERCEPTION LOGIC
+            if (tool.type === "requestDiff") {
+                // 1. Store the change data in state (shows the UI)
+                setPendingDiff(tool.value as PendingChange);
+                
+                // 2. Tell VS Code to open the visual Diff Editor
+                vscode.postMessage({
+                    type: "requestDiff",
+                    value: tool.value
+                });
+            } else {
+                // 3. For other tools (readFile, executeCommand), run immediately
+                vscode.postMessage({
+                    type: tool.type,
+                    value: tool.value,
+                });
+            }
           });
 
-          // Clear buffer for the next turn
           streamBuffer.current = "";
           break;
         }
         
         case "updateAgents":
-          // Handle agent list updates if needed
           break;
       }
     };
@@ -76,18 +86,12 @@ export const ChatView = () => {
 
   const handleSend = () => {
     if (!input.trim()) return;
-
-    // 1. Add User Message to UI
     setMessages((prev) => [...prev, { role: "user", content: input }]);
-    
-    // 2. Send to Extension Backend
-    // Note: You might want to pass the selected agentId here if you have a selector
     vscode.postMessage({ 
       type: "onPrompt", 
       value: input,
-      agentId: "default-agent-id" // Replace with actual selected ID
+      agentId: "default-agent-id" 
     });
-
     setInput("");
   };
 
@@ -98,6 +102,44 @@ export const ChatView = () => {
     }
   };
 
+  // [NEW] Button Handler: User clicked Accept
+  const handleAcceptDiff = () => {
+    if (!pendingDiff) return;
+
+    // Send the confirm signal to write the file
+    vscode.postMessage({
+        type: "applyFile",
+        value: pendingDiff
+    });
+
+    setPendingDiff(null); // Hide UI
+    // Optional: Add a small system note to UI
+    setMessages(prev => [...prev, { role: "user", content: "✅ Changes approved." }]);
+  };
+
+  // [NEW] Button Handler: User clicked Reject
+  const handleRejectDiff = () => {
+    if (!pendingDiff) return;
+
+    // Close the diff view in VS Code (optional, implies you need a handler in backend)
+    vscode.postMessage({ type: "executeCommand", value: "workbench.action.closeActiveEditor" });
+
+    // Send feedback to the agent so it knows to try again
+    const rejectionMessage = `I rejected the changes to ${pendingDiff.path}. Please review the code and try a different approach.`;
+    
+    // Reset state
+    setPendingDiff(null);
+
+    // Auto-send the rejection message to the LLM
+    vscode.postMessage({ 
+        type: "onPrompt", 
+        value: rejectionMessage,
+        agentId: "default-agent-id"
+    });
+    
+    setMessages(prev => [...prev, { role: "user", content: "❌ Changes rejected." }]);
+  };
+
   return (
     <div className="chat-container">
       <div className="messages-list">
@@ -106,12 +148,41 @@ export const ChatView = () => {
             <div className="message-header">
               {msg.role === "user" ? "You" : "Agent"}
             </div>
-            {/* Render content - You could use a Markdown renderer here */}
             <div className="message-content">
               {msg.content}
             </div>
           </div>
         ))}
+        
+        {/* [NEW] REVIEW UI COMPONENT */}
+        {pendingDiff && (
+            <div className="review-container" style={{
+                marginTop: '1rem',
+                padding: '10px',
+                border: '1px solid var(--vscode-focusBorder)',
+                borderRadius: '5px',
+                backgroundColor: 'var(--vscode-editor-background)'
+            }}>
+                <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
+                    📝 Reviewing: {pendingDiff.path}
+                </div>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                    <button 
+                        onClick={handleAcceptDiff}
+                        style={{ backgroundColor: 'var(--vscode-charts-green)', color: 'white', flex: 1 }}
+                    >
+                        Accept
+                    </button>
+                    <button 
+                        onClick={handleRejectDiff}
+                        style={{ backgroundColor: 'var(--vscode-errorForeground)', color: 'white', flex: 1 }}
+                    >
+                        Reject
+                    </button>
+                </div>
+            </div>
+        )}
+
         {isThinking && <div className="loading-indicator">Thinking...</div>}
       </div>
 
@@ -122,8 +193,10 @@ export const ChatView = () => {
           onKeyDown={handleKeyDown}
           placeholder="Ask your agent to code..."
           rows={3}
+          // [NEW] Disable input while reviewing to force a decision
+          disabled={!!pendingDiff} 
         />
-        <button onClick={handleSend} disabled={isThinking}>
+        <button onClick={handleSend} disabled={isThinking || !!pendingDiff}>
           Send
         </button>
       </div>

@@ -8,11 +8,8 @@ export type ToolRequest =
       value: string; 
     }
   | { 
-      type: "applyFile"; 
-      value: { 
-        path: string; 
-        content: string; 
-      }; 
+      type: "requestDiff"; 
+      value: { path: string; content: string };
     };
 
 export const parseTools = (content: string): ToolRequest[] => {
@@ -31,7 +28,7 @@ export const parseTools = (content: string): ToolRequest[] => {
   let writeMatch;
   while ((writeMatch = writeRegex.exec(content)) !== null) {
     requests.push({
-      type: "applyFile",
+      type: "requestDiff",
       value: {
         path: writeMatch[1],
         content: writeMatch[2].trim()
